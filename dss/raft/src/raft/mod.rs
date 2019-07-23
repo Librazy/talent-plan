@@ -106,6 +106,7 @@ impl Stream for Raft {
             Role::Leader => self.step_leader(),
         };
         self.apply_commited();
+        self.persist();
         state
     }
 }
@@ -132,7 +133,9 @@ impl Raft {
         apply_ch: UnboundedSender<ApplyMsg>,
     ) -> Raft {
         let raft_state = persister.raft_state();
+        let snapshot = persister.snapshot();
         let (propose_sender, propose_receiver) = channel();
+        
         // Your initialization code here (2A, 2B, 2C).
         let mut rf = Raft {
             peers,
@@ -176,6 +179,14 @@ impl Raft {
         // labcodec::encode(&self.xxx, &mut data).unwrap();
         // labcodec::encode(&self.yyy, &mut data).unwrap();
         // self.persister.save_raft_state(data);
+        let mut state = Vec::new();
+        labcodec::encode(&PersistedState {
+            term: self.term,
+            has_voted_for: self.voted_for.is_some(),
+            voted_for: self.voted_for.unwrap_or(0),
+            entries: self.logs.clone(),
+        }, &mut state).unwrap();
+        self.persister.save_raft_state(state);
     }
 
     /// restore previously persisted state.
@@ -183,6 +194,18 @@ impl Raft {
         if data.is_empty() {
             // bootstrap without any state?
             return;
+        }
+        let result: std::result::Result<PersistedState, labcodec::DecodeError> = labcodec::decode(data);
+
+        match result {
+            Ok(o) => {
+                self.term = o.term;
+                self.voted_for = if o.has_voted_for { Some(o.voted_for) } else { None };
+                self.logs = o.entries;
+            }
+            Err(e) => {
+                panic!("{:?}", e);
+            }
         }
         // Your code here (2C).
         // Example:
@@ -429,7 +452,9 @@ impl Raft {
                         term: self.term,
                         success: true,
                     })
-                    .unwrap();
+                    .unwrap_or_else(|err| {
+                        debug!("{} error sending app_ent_rep: {:?}", self.me, err);
+                    });
             } else {
                 info!(
                     "({}, {}) log mismatch at {}",
@@ -440,7 +465,9 @@ impl Raft {
                         term: self.term,
                         success: false,
                     })
-                    .unwrap();
+                    .unwrap_or_else(|err| {
+                        debug!("{} error sending app_ent_rep: {:?}", self.me, err);
+                    });
             }
         } else {
             rep_sender
@@ -448,7 +475,9 @@ impl Raft {
                     term: self.term,
                     success: false,
                 })
-                .unwrap();
+                .unwrap_or_else(|err| {
+                    debug!("{} error sending app_ent_rep: {:?}", self.me, err);
+                });
         }
         self.state()
     }
@@ -717,6 +746,7 @@ impl Raft {
 // ```
 #[derive(Clone)]
 pub struct Node {
+    me: usize,
     propose_sender: Sender<Propose>,
     state: std::sync::Arc<std::sync::RwLock<State>>,
 }
@@ -753,6 +783,7 @@ impl Node {
             debug!("{} quited", me);
         });
         Node {
+            me,
             propose_sender,
             state,
         }
@@ -777,8 +808,10 @@ impl Node {
         let (tx, rx) = oneshot::channel();
         let mut buf = vec![];
         labcodec::encode(command, &mut buf).map_err(Error::Encode)?;
-        self.propose_sender.send(Propose::Message(buf, tx)).unwrap();
-        rx.wait().unwrap()
+        if self.propose_sender.send(Propose::Message(buf, tx)).is_err() {
+            return Err(Error::NotLeader);
+        }
+        rx.wait().unwrap_or(Err(Error::NotLeader))
     }
 
     /// The current term of this peer.
@@ -816,7 +849,9 @@ impl RaftService for Node {
         let (tx, rx) = oneshot::channel();
         self.propose_sender
             .send(Propose::RequestVoteArgs(args, tx))
-            .unwrap();
+            .unwrap_or_else(|err| {
+                debug!("{} error sending request_vote: {:?}", self.me, err);
+            });
         Box::new(rx.map_err(|c| labrpc::Error::Timeout))
     }
 
@@ -824,7 +859,9 @@ impl RaftService for Node {
         let (tx, rx) = oneshot::channel();
         self.propose_sender
             .send(Propose::AppendEntriesArgs(args, tx))
-            .unwrap();
+            .unwrap_or_else(|err| {
+                debug!("{} error sending request_vote: {:?}", self.me, err);
+            });
         Box::new(rx.map_err(|c| labrpc::Error::Timeout))
     }
 }

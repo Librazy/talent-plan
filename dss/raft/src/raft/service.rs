@@ -68,3 +68,15 @@ pub struct LogEntry {
     #[prost(bytes, tag = 3)]
     pub log: Vec<u8>,
 }
+
+#[derive(Clone, PartialEq, Message)]
+pub struct PersistedState {
+    #[prost(uint64, tag = 1)]
+    pub term: u64,
+    #[prost(uint64, tag = 2)]
+    pub voted_for: u64,
+    #[prost(bool, tag = 3)]
+    pub has_voted_for: bool,
+    #[prost(message, repeated, tag = 4)]
+    pub entries: Vec<LogEntry>,
+}
